@@ -104,6 +104,12 @@ CFDictionaryGetValue.argtypes = (
     c_void_p,
 )
 
+CFRelease = _found.CFRelease
+CFRelease.restype = None
+CFRelease.argtypes = (
+    c_void_p,
+)
+
 def k_(s):
     return c_void_p.in_dll(_sec, s)
 
@@ -129,15 +135,29 @@ def _(s: str):
 
 
 def create_query(**kwargs):
-    return CFDictionaryCreate(
-        None,
-        (c_void_p * len(kwargs))(*map(k_, kwargs.keys())),
-        (c_void_p * len(kwargs))(*map(create_cf, kwargs.values())),
-        len(kwargs),
-        _found.kCFTypeDictionaryKeyCallBacks,
-        _found.kCFTypeDictionaryValueCallBacks,
-    )
+    values_cf = []
+    try:
+        values_cf.extend(create_cf(v) for v in kwargs.values())
 
+        cf_dict = CFDictionaryCreate(
+            None,
+            (c_void_p * len(kwargs))(*map(k_, kwargs.keys())),
+            (c_void_p * len(kwargs))(*values_cf),
+            len(kwargs),
+            _found.kCFTypeDictionaryKeyCallBacks,
+            _found.kCFTypeDictionaryValueCallBacks,
+        )
+
+        return cf_dict
+
+    finally:
+        # Free memory
+        for cf in values_cf:
+            # Note: some values here are borrowed CF constants (e.g. kSecClass)
+            # We don't own them and releasing them would normally be an over-release.
+            # Since they are implemented as immortal CF objects,
+            # CFRelease on them is a silent no-op.
+            CFRelease(cf)
 
 def cfstr_to_str(data):
     return ctypes.string_at(CFDataGetBytePtr(data), CFDataGetLength(data)).decode(
@@ -183,63 +203,87 @@ class SecAuthFailure(Error):
 
 
 def find_generic_password(kc_name, service, username):
-    query = dict(
-        kSecClass=k_('kSecClassGenericPassword'),
-        kSecMatchLimit=k_('kSecMatchLimitOne'),
-        kSecAttrService=service,
-        kSecReturnAttributes=True,
-        kSecReturnData=True,
-    )
+    q = None
+    data = c_void_p()
 
-    # Use the username in the query, if provided
-    if bool(username):
+    try:
         query = dict(
-            query,
-            kSecAttrAccount=username,
+            kSecClass=k_('kSecClassGenericPassword'),
+            kSecMatchLimit=k_('kSecMatchLimitOne'),
+            kSecAttrService=service,
+            kSecReturnAttributes=True,
+            kSecReturnData=True,
         )
 
-    q = create_query(**query)
+        # Use the username in the query, if provided
+        if bool(username):
+            query = dict(
+                query,
+                kSecAttrAccount=username,
+            )
 
-    data = c_void_p()
-    status = SecItemCopyMatching(q, byref(data))
+        q = create_query(**query)
 
-    Error.raise_for_status(status)
+        status = SecItemCopyMatching(q, byref(data))
 
-    # Extract username and password from the query
-    ret_username = None
-    password = None
-    if CFDictionaryContainsKey(data, k_('kSecAttrAccount')):
-        ret = CFDictionaryGetValue(data, k_('kSecAttrAccount'))
-        ret_username = cfstring_to_str(ret)
+        Error.raise_for_status(status)
 
-    if CFDictionaryContainsKey(data, k_('kSecValueData')):
-        ret = CFDictionaryGetValue(data, k_('kSecValueData'))
-        password = cfstr_to_str(ret)
+        # Extract username and password from the query
+        ret_username = None
+        password = None
+        if CFDictionaryContainsKey(data, k_('kSecAttrAccount')):
+            ret = CFDictionaryGetValue(data, k_('kSecAttrAccount'))
+            ret_username = cfstring_to_str(ret)
 
-    return ret_username, password
+        if CFDictionaryContainsKey(data, k_('kSecValueData')):
+            ret = CFDictionaryGetValue(data, k_('kSecValueData'))
+            password = cfstr_to_str(ret)
+
+        return ret_username, password
+    finally:
+        # Free memory
+        if q:
+            CFRelease(q)
+        if data.value:
+            CFRelease(data)
 
 
 def set_generic_password(name, service, username, password):
     with contextlib.suppress(NotFound):
         delete_generic_password(name, service, username)
 
-    q = create_query(
-        kSecClass=k_('kSecClassGenericPassword'),
-        kSecAttrService=service,
-        kSecAttrAccount=username,
-        kSecValueData=password,
-    )
+    q = None
 
-    status = SecItemAdd(q, None)
-    Error.raise_for_status(status)
+    try:
+        q = create_query(
+            kSecClass=k_('kSecClassGenericPassword'),
+            kSecAttrService=service,
+            kSecAttrAccount=username,
+            kSecValueData=password,
+        )
 
+        status = SecItemAdd(q, None)
+        Error.raise_for_status(status)
+
+    finally:
+        # Free memory
+        if q:
+            CFRelease(q)
 
 def delete_generic_password(name, service, username):
-    q = create_query(
-        kSecClass=k_('kSecClassGenericPassword'),
-        kSecAttrService=service,
-        kSecAttrAccount=username,
-    )
+    q = None
 
-    status = SecItemDelete(q)
-    Error.raise_for_status(status)
+    try:
+        q = create_query(
+            kSecClass=k_('kSecClassGenericPassword'),
+            kSecAttrService=service,
+            kSecAttrAccount=username,
+        )
+
+        status = SecItemDelete(q)
+        Error.raise_for_status(status)
+
+    finally:
+        # Free memory
+        if q:
+            CFRelease(q)
