@@ -6,6 +6,7 @@ import functools
 from ctypes import (
     byref,
     c_int32,
+    c_long,
     c_uint32,
     c_void_p,
 )
@@ -32,7 +33,7 @@ CFDictionaryCreate.argtypes = (
     c_void_p,
     c_void_p,
     c_void_p,
-    c_int32,
+    c_long,
     c_void_p,
     c_void_p,
 )
@@ -43,7 +44,7 @@ CFStringCreateWithCString.argtypes = [c_void_p, c_void_p, c_uint32]
 
 CFNumberCreate = _found.CFNumberCreate
 CFNumberCreate.restype = c_void_p
-CFNumberCreate.argtypes = [c_void_p, c_uint32, ctypes.c_void_p]
+CFNumberCreate.argtypes = [c_void_p, c_long, ctypes.c_void_p]
 
 SecItemAdd = _sec.SecItemAdd
 SecItemAdd.restype = OS_status
@@ -62,7 +63,7 @@ CFDataGetBytePtr.restype = c_void_p
 CFDataGetBytePtr.argtypes = (c_void_p,)
 
 CFDataGetLength = _found.CFDataGetLength
-CFDataGetLength.restype = c_int32
+CFDataGetLength.restype = c_long
 CFDataGetLength.argtypes = (c_void_p,)
 
 
@@ -79,10 +80,10 @@ def create_cf(ob):
 @create_cf.register(bool)
 @create_cf.register(int)
 def _(val: bool | int):
+    kCFNumberSInt32Type = 3
     if val.bit_length() > 31:
         raise OverflowError(val)
-    int32 = 0x9
-    return CFNumberCreate(None, int32, ctypes.byref(c_int32(val)))
+    return CFNumberCreate(None, kCFNumberSInt32Type, ctypes.byref(c_int32(val)))
 
 
 @create_cf.register
