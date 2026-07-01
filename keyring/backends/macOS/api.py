@@ -5,6 +5,7 @@ import ctypes
 import functools
 from ctypes import (
     byref,
+    c_bool,
     c_int32,
     c_long,
     c_uint32,
@@ -22,6 +23,7 @@ class error:
     plist_missing = -67030
     sec_interaction_not_allowed = -25308
 
+kCFStringEncodingUTF8 = 0x08000100
 
 _sec = ctypes.CDLL(find_library('Security'))
 _core = ctypes.CDLL(find_library('CoreServices'))
@@ -66,6 +68,41 @@ CFDataGetLength = _found.CFDataGetLength
 CFDataGetLength.restype = c_long
 CFDataGetLength.argtypes = (c_void_p,)
 
+CFStringGetLength = _found.CFStringGetLength
+CFStringGetLength.restype = c_long
+CFStringGetLength.argtypes = (
+    c_void_p,
+)
+
+CFStringGetMaximumSizeForEncoding = _found.CFStringGetMaximumSizeForEncoding
+CFStringGetMaximumSizeForEncoding.restype = c_long
+CFStringGetMaximumSizeForEncoding.argtypes = (
+    c_long,
+    c_uint32
+)
+
+CFStringGetCString = _found.CFStringGetCString
+CFStringGetCString.restype = c_bool
+CFStringGetCString.argtypes = (
+    c_void_p,
+    c_void_p,
+    c_long,
+    c_uint32
+)
+
+CFDictionaryContainsKey = _found.CFDictionaryContainsKey
+CFDictionaryContainsKey.restype = c_bool
+CFDictionaryContainsKey.argtypes = (
+    c_void_p,
+    c_void_p,
+)
+
+CFDictionaryGetValue = _found.CFDictionaryGetValue
+CFDictionaryGetValue.restype = c_void_p
+CFDictionaryGetValue.argtypes = (
+    c_void_p,
+    c_void_p,
+)
 
 def k_(s):
     return c_void_p.in_dll(_sec, s)
@@ -88,7 +125,6 @@ def _(val: bool | int):
 
 @create_cf.register
 def _(s: str):
-    kCFStringEncodingUTF8 = 0x08000100
     return CFStringCreateWithCString(None, s.encode('utf8'), kCFStringEncodingUTF8)
 
 
@@ -108,6 +144,13 @@ def cfstr_to_str(data):
         'utf-8'
     )
 
+def cfstring_to_str(cf_string):
+    str_length = CFStringGetLength(cf_string)
+    str_max_size = CFStringGetMaximumSizeForEncoding(str_length, kCFStringEncodingUTF8) + 1
+    buffer = ctypes.create_string_buffer(str_max_size)
+    if CFStringGetCString(cf_string, buffer, str_max_size, kCFStringEncodingUTF8):
+        return ctypes.string_at(buffer).decode('utf-8')
+    return None
 
 class Error(Exception):
     @classmethod
@@ -140,20 +183,40 @@ class SecAuthFailure(Error):
 
 
 def find_generic_password(kc_name, service, username):
-    q = create_query(
+    query = dict(
         kSecClass=k_('kSecClassGenericPassword'),
         kSecMatchLimit=k_('kSecMatchLimitOne'),
         kSecAttrService=service,
-        kSecAttrAccount=username,
+        kSecReturnAttributes=True,
         kSecReturnData=True,
     )
+
+    # Use the username in the query, if provided
+    if bool(username):
+        query = dict(
+            query,
+            kSecAttrAccount=username,
+        )
+
+    q = create_query(**query)
 
     data = c_void_p()
     status = SecItemCopyMatching(q, byref(data))
 
     Error.raise_for_status(status)
 
-    return cfstr_to_str(data)
+    # Extract username and password from the query
+    ret_username = None
+    password = None
+    if CFDictionaryContainsKey(data, k_('kSecAttrAccount')):
+        ret = CFDictionaryGetValue(data, k_('kSecAttrAccount'))
+        ret_username = cfstring_to_str(ret)
+
+    if CFDictionaryContainsKey(data, k_('kSecValueData')):
+        ret = CFDictionaryGetValue(data, k_('kSecValueData'))
+        password = cfstr_to_str(ret)
+
+    return ret_username, password
 
 
 def set_generic_password(name, service, username, password):
